@@ -4,10 +4,11 @@
 const MEMOS_KEY = 'memos';        // { "YYYY-MM-DD": { text, updatedAt } }
 const SIZE_KEY = 'popupSize';     // { w, h }
 const SETTINGS_KEY = 'settings';  // { sync: bool, fontSize: 'normal'|'large' }
+const DELETED_KEY = 'deleted';    // { "YYYY-MM-DD": 삭제시각 } 동기화 때 다른 기기에서 되살아나지 않게 함
 const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
-const SYNC_ITEM_LIMIT = 8192;     // chrome.storage.sync 항목당 바이트 제한
 
 let memos = {};
+let deleted = {};
 let settings = { sync: false, fontSize: 'normal' };
 let currentDate = '';
 let saveTimer = null;
@@ -217,8 +218,10 @@ function formatTime(ts) {
 
 /* ---------- 저장소 ---------- */
 async function load() {
-  const res = await chrome.storage.local.get([MEMOS_KEY, SETTINGS_KEY, SIZE_KEY]);
+  const res = await chrome.storage.local.get([MEMOS_KEY, DELETED_KEY, SETTINGS_KEY, SIZE_KEY, 'syncState']);
   memos = res[MEMOS_KEY] || {};
+  deleted = res[DELETED_KEY] || {};
+  syncState = res.syncState || null;
   settings = Object.assign({ sync: false, fontSize: 'normal' }, res[SETTINGS_KEY]);
   const s = res[SIZE_KEY];
   if (s && s.w && s.h) applySize(s.w, s.h);
@@ -226,81 +229,36 @@ async function load() {
 }
 async function persistMemos() {
   selfWriting = true;
-  await chrome.storage.local.set({ [MEMOS_KEY]: memos });
+  await chrome.storage.local.set({ [MEMOS_KEY]: memos, [DELETED_KEY]: deleted });
   selfWriting = false;
 }
 async function persistSettings() {
   await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
 }
 
-/* ---------- 동기화 (chrome.storage.sync, 날짜별 항목) ---------- */
-const syncKey = (date) => `m:${date}`;
-const tombKey = (date) => `d:${date}`;   // 삭제 기록: 값은 삭제 시각
+/* ---------- 동기화 (구글 드라이브, background.js 가 수행) ----------
+ * 팝업은 로컬에 저장한 뒤 background 에 메시지만 보냄. 결과는 storage.local 의 syncState 로 돌아옴.
+ */
 const byteSize = (obj) => new TextEncoder().encode(JSON.stringify(obj)).length;
+let syncState = null;
 
-async function syncPush(date) {
-  if (!settings.sync) return true;
-  const m = memos[date];
-  try {
-    if (!m) {
-      // 삭제: 메모를 지우고 삭제 기록을 남겨 다른 기기에서 되살아나지 않게 함
-      await chrome.storage.sync.remove(syncKey(date));
-      await chrome.storage.sync.set({ [tombKey(date)]: Date.now() });
-      return true;
-    }
-    if (byteSize(m) > SYNC_ITEM_LIMIT) return false;
-    await chrome.storage.sync.set({ [syncKey(date)]: m });
-    await chrome.storage.sync.remove(tombKey(date));
-    return true;
-  } catch (e) {
-    return false;
-  }
+function requestSync() {
+  if (!settings.sync) return;
+  chrome.runtime.sendMessage({ type: 'sync' }).catch(() => {});
 }
-// 양방향 병합: 날짜가 같으면 updatedAt이 큰 쪽이 이김. 삭제 기록이 더 최신이면 로컬도 삭제.
-// 쓰기는 한 번에 묶어서 보냄 (분당 쓰기 횟수 제한 대비)
-async function syncMerge() {
-  if (!settings.sync) return { pulled: 0, pushed: 0, skipped: 0 };
-  const all = await chrome.storage.sync.get(null);
-  let pulled = 0, pushed = 0, skipped = 0, changed = false;
-  const toSet = {};
-  const toRemove = [];
-  for (const k of Object.keys(all)) {
-    if (k.startsWith('m:')) {
-      const date = k.slice(2);
-      const remote = all[k];
-      const local = memos[date];
-      if (remote && remote.text && (!local || remote.updatedAt > local.updatedAt)) {
-        memos[date] = remote; pulled++; changed = true;
-      }
-    } else if (k.startsWith('d:')) {
-      const date = k.slice(2);
-      const local = memos[date];
-      if (local && local.updatedAt <= all[k]) { delete memos[date]; pulled++; changed = true; }
-    }
-  }
-  if (changed) await persistMemos();
-  for (const date of Object.keys(memos)) {
-    const remote = all[syncKey(date)];
-    if (!remote || memos[date].updatedAt > remote.updatedAt) {
-      if (byteSize(memos[date]) > SYNC_ITEM_LIMIT) { skipped++; continue; }
-      toSet[syncKey(date)] = memos[date];
-      if (all[tombKey(date)] !== undefined) toRemove.push(tombKey(date));
-      pushed++;
-    }
-  }
-  try {
-    if (Object.keys(toSet).length) await chrome.storage.sync.set(toSet);
-    if (toRemove.length) await chrome.storage.sync.remove(toRemove);
-  } catch (e) {
-    skipped += pushed; pushed = 0;
-  }
-  return { pulled, pushed, skipped };
+// 상태줄 뒤에 붙일 동기화 문구. 정상이면 빈 문자열
+function syncNote() {
+  if (!settings.sync || !syncState || syncState.ok) return '';
+  if (syncState.error === 'auth') return ' · 동기화: 구글 로그인 필요';
+  if (syncState.error === 'quota') return ' · 드라이브 용량 부족';
+  return ' · 동기화 실패, 다시 시도합니다';
 }
 
 /* ---------- 메모 저장 ---------- */
 function applyEditorToMemos() {
   const text = getText();
   if (text.trim() === '') { delete memos[currentDate]; return; } // 빈 메모는 보관하지 않음
+  delete deleted[currentDate];
   const item = { text, updatedAt: Date.now() };
   const html = normalizeHtml(memoEl);
   if (html !== null) item.html = html; // 서식이 있을 때만 html 보관
@@ -310,12 +268,11 @@ async function saveNow() {
   clearTimeout(saveTimer);
   saveTimer = null;
   if (!dirty) return;
-  const date = currentDate;
   applyEditorToMemos();
   await persistMemos();
   dirty = false;
   updateStatus();
-  if (!(await syncPush(date))) statusEl.textContent = '저장됨 · 동기화 용량 초과';
+  requestSync();
 }
 function scheduleSave() {
   dirty = true;
@@ -327,7 +284,7 @@ function scheduleSave() {
 /* ---------- 편집 화면 ---------- */
 function updateStatus() {
   const m = memos[currentDate];
-  statusEl.textContent = m ? `저장됨 ${formatTime(m.updatedAt)}` : '저장됨';
+  statusEl.textContent = (m ? `저장됨 ${formatTime(m.updatedAt)}` : '저장됨') + syncNote();
   btnDelete.hidden = !m;
   resetDeleteButton();
 }
@@ -364,8 +321,9 @@ async function onDeleteClick() {
   dirty = false;
   const date = currentDate;
   delete memos[date];
+  deleted[date] = Date.now();
   await persistMemos();
-  await syncPush(date);
+  requestSync();
   setContent(null);
   updateStatus();
   memoEl.focus();
@@ -462,18 +420,26 @@ function applyFontSize() {
 function renderSettings() {
   optSync.checked = !!settings.sync;
   applyFontSize();
-  settingsInfo.textContent = `메모 ${Object.keys(memos).length}개 · ${(byteSize(memos) / 1024).toFixed(1)}KB`;
+  settingsInfo.textContent = `메모 ${Object.keys(memos).length}개 · ${(byteSize(memos) / 1024).toFixed(1)}KB` + syncNote();
 }
 async function onToggleSync() {
   settings.sync = optSync.checked;
   await persistSettings();
-  if (settings.sync) {
-    settingsInfo.textContent = '동기화 중…';
-    const r = await syncMerge();
-    settingsInfo.textContent = `동기화 완료 · 받음 ${r.pulled} · 보냄 ${r.pushed}` + (r.skipped ? ` · 용량 초과 ${r.skipped}` : '');
-  } else {
-    renderSettings();
+  if (!settings.sync) { renderSettings(); return; }
+  // 구글 로그인 (허용 창은 사용자가 토글을 누른 직후에만 띄울 수 있음)
+  settingsInfo.textContent = '구글 로그인 중…';
+  try {
+    await chrome.identity.getAuthToken({ interactive: true });
+  } catch (e) {
+    settings.sync = false;
+    optSync.checked = false;
+    await persistSettings();
+    settingsInfo.textContent = '로그인을 취소했습니다';
+    return;
   }
+  settingsInfo.textContent = '동기화 중…';
+  syncState = null;
+  requestSync();
 }
 /* ---------- 내보내기 ---------- */
 const ex = { range: 'all', format: 'json', pendingDelete: null };
@@ -554,17 +520,10 @@ function downloadFile(file) {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 async function deleteMany(keys) {
-  for (const k of keys) delete memos[k];
+  const now = Date.now();
+  for (const k of keys) { delete memos[k]; deleted[k] = now; }
   await persistMemos();
-  if (settings.sync) {
-    try {
-      await chrome.storage.sync.remove(keys.map(syncKey));
-      const tomb = {};
-      const now = Date.now();
-      for (const k of keys) tomb[tombKey(k)] = now;
-      await chrome.storage.sync.set(tomb);
-    } catch (e) { /* 용량 초과 등은 무시 */ }
-  }
+  requestSync();
   if (!memos[currentDate]) setContent(null);
 }
 async function onExportGo() {
@@ -599,9 +558,11 @@ async function importJson(file) {
       if (typeof v.html === 'string' && v.html) item.html = v.html; // 서식 보존 (불러올 때 다시 정규화됨)
       if (!memos[k]) { memos[k] = item; added++; }
       else if (item.updatedAt > memos[k].updatedAt) { memos[k] = item; updated++; }
+      else continue;
+      delete deleted[k];
     }
     await persistMemos();
-    await syncMerge();
+    requestSync();
     settingsInfo.textContent = `가져오기 완료 · 추가 ${added} · 갱신 ${updated}`;
     if (!views.editor.hidden) openDate(currentDate, false);
   } catch (e) {
@@ -899,24 +860,13 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (!views.editor.hidden && !dirty) openDate(currentDate, false);
     else if (!views.list.hidden) renderList();
   }
-  if (area === 'sync' && settings.sync && !selfWriting) {
-    let changed = false;
-    for (const [k, c] of Object.entries(changes)) {
-      if (k.startsWith('d:')) {
-        const date = k.slice(2);
-        if (c.newValue !== undefined && memos[date] && memos[date].updatedAt <= c.newValue) { delete memos[date]; changed = true; }
-        continue;
-      }
-      if (!k.startsWith('m:')) continue;
-      const date = k.slice(2);
-      const v = c.newValue;
-      if (v && v.text && (!memos[date] || v.updatedAt > memos[date].updatedAt)) { memos[date] = v; changed = true; }
-      if (!v && memos[date] && c.oldValue && c.oldValue.updatedAt >= memos[date].updatedAt) { delete memos[date]; changed = true; }
-    }
-    if (changed) {
-      persistMemos();
-      if (!views.editor.hidden && !dirty) openDate(currentDate, false);
-      else if (!views.list.hidden) renderList();
+  if (area === 'local' && changes[DELETED_KEY] && !selfWriting) deleted = changes[DELETED_KEY].newValue || {};
+  if (area === 'local' && changes.syncState) {
+    syncState = changes.syncState.newValue || null;
+    if (!views.editor.hidden && !dirty) updateStatus();
+    else if (!views.settings.hidden) {
+      if (syncState && syncState.ok) settingsInfo.textContent = `동기화 완료 · 받음 ${syncState.pulled} · 보냄 ${syncState.pushed}`;
+      else renderSettings();
     }
   }
 });
@@ -925,12 +875,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
 window.addEventListener('pagehide', () => {
   if (!dirty) return;
   clearTimeout(saveTimer);
-  const date = currentDate;
   applyEditorToMemos();
-  chrome.storage.local.set({ [MEMOS_KEY]: memos });
-  if (settings.sync && memos[date] && byteSize(memos[date]) <= SYNC_ITEM_LIMIT) {
-    chrome.storage.sync.set({ [syncKey(date)]: memos[date] });
-  }
+  chrome.storage.local.set({ [MEMOS_KEY]: memos, [DELETED_KEY]: deleted });
+  requestSync();
 });
 
 /* ---------- 시작 ---------- */
@@ -938,9 +885,6 @@ window.addEventListener('pagehide', () => {
   refreshHlColors();
   await load();
   openDate(todayKey());
-  // 동기화 켜져 있으면 백그라운드로 병합
-  if (settings.sync) {
-    const r = await syncMerge();
-    if (r.pulled && !dirty) openDate(currentDate, false);
-  }
+  // 동기화 켜져 있으면 background 가 받아오고, 바뀐 메모는 storage.onChanged 로 화면에 반영됨
+  requestSync();
 })();
