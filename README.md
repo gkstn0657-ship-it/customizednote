@@ -5,6 +5,8 @@
 - 심플한 기능 , 심플한 UI ---- ( 새로 배우지 않아도 되는 기능을 모토로 심플하게 기획) 
 - 쉬운 접근성 ---- ( 크롬으로 언제나 쉬운 접근 ) 
 
+사용하기 : https://chromewebstore.google.com/detail/kedcopdniobclbhkilmfocdapigdappd
+
 ## 기능
 - 아이콘 클릭 또는 `Alt+Shift+M` → 오늘 날짜의 메모장이 바로 열림
 - 입력하면 자동 저장 (팝업을 닫아도 저장)
