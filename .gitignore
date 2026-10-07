@@ -1,0 +1,6 @@
+# 생성물 / 임시
+store/_tmp.html
+tools/preview.html
+*.zip
+.DS_Store
+Thumbs.db

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Daily Memo</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- 편집 화면 -->
+  <section id="view-editor" class="view">
+    <header class="bar">
+      <button id="btn-list" class="icon-btn" title="메모 목록 (Esc)" aria-label="메모 목록">
+        <svg viewBox="0 0 20 20"><path d="M3 5h14M3 10h14M3 15h14"/></svg>
+      </button>
+      <div class="title">
+        <button id="btn-prev" class="icon-btn small" title="전날 (Alt+←)" aria-label="전날">
+          <svg viewBox="0 0 20 20"><path d="M12 4l-6 6 6 6"/></svg>
+        </button>
+        <button id="date-label" class="date-btn" title="달력 열기"></button>
+        <button id="btn-next" class="icon-btn small" title="다음날 (Alt+→)" aria-label="다음날">
+          <svg viewBox="0 0 20 20"><path d="M8 4l6 6-6 6"/></svg>
+        </button>
+        <button id="btn-today" class="chip" hidden>오늘로</button>
+      </div>
+      <button id="btn-search" class="icon-btn" title="검색 (Ctrl+F)" aria-label="검색">
+        <svg viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4"/></svg>
+      </button>
+    </header>
+
+    <div class="memo-wrap">
+      <div id="memo" class="memo" contenteditable="true" spellcheck="false" data-placeholder="오늘의 메모를 적어보세요"></div>
+      <!-- 글자를 선택하면 나타나는 서식 버튼 -->
+      <div id="fmt" class="fmt" hidden>
+        <button data-cmd="bold" title="굵게 (Ctrl+B)"><b>B</b></button>
+        <button data-cmd="mark" data-color="y" title="노랑 형광펜 (Ctrl+H)"><span class="swatch y"></span></button>
+        <button data-cmd="mark" data-color="r" title="빨강 형광펜"><span class="swatch r"></span></button>
+        <button data-cmd="mark" data-color="g" title="초록 형광펜"><span class="swatch g"></span></button>
+        <button data-cmd="smaller" title="작게 (Ctrl+[)"><span class="a-sm">A</span></button>
+        <button data-cmd="bigger" title="크게 (Ctrl+])"><span class="a-lg">A</span></button>
+      </div>
+      <!-- 달력 (날짜 제목을 누르면 열림) -->
+      <div id="cal" class="cal" hidden>
+        <div class="cal-head">
+          <button id="cal-prev" class="icon-btn" title="이전 달" aria-label="이전 달">
+            <svg viewBox="0 0 20 20"><path d="M12 4l-6 6 6 6"/></svg>
+          </button>
+          <div id="cal-title" class="cal-title"></div>
+          <button id="cal-next" class="icon-btn" title="다음 달" aria-label="다음 달">
+            <svg viewBox="0 0 20 20"><path d="M8 4l6 6-6 6"/></svg>
+          </button>
+        </div>
+        <div class="cal-week">
+          <span class="sun">일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span class="sat">토</span>
+        </div>
+        <div id="cal-grid" class="cal-grid"></div>
+        <div class="cal-foot">
+          <button id="cal-today" class="chip">오늘</button>
+        </div>
+      </div>
+      <!-- 이모지 트레이 (하단 🙂 버튼으로 열고 닫음) -->
+      <div id="emoji-row" class="emoji-row" hidden>
+        <button type="button" data-emoji="✅">✅</button>
+        <button type="button" data-emoji="⭐">⭐</button>
+        <button type="button" data-emoji="❗">❗</button>
+        <button type="button" data-emoji="💡">💡</button>
+        <button type="button" data-emoji="📌">📌</button>
+        <button type="button" data-emoji="🔥">🔥</button>
+        <button type="button" data-emoji="❤️">❤️</button>
+        <button type="button" data-emoji="📞">📞</button>
+        <button type="button" data-emoji="💰">💰</button>
+        <button type="button" data-emoji="🎯">🎯</button>
+      </div>
+    </div>
+
+    <footer class="bar foot">
+      <span id="status">저장됨</span>
+      <span class="foot-right">
+        <button id="btn-emoji" class="text-btn emoji-btn" title="이모지">🙂</button>
+        <button id="btn-delete" class="text-btn" hidden>삭제</button>
+      </span>
+    </footer>
+  </section>
+
+  <!-- 목록 / 검색 화면 -->
+  <section id="view-list" class="view" hidden>
+    <header class="bar">
+      <button id="btn-back" class="icon-btn" title="돌아가기 (Esc)" aria-label="돌아가기">
+        <svg viewBox="0 0 20 20"><path d="M12 4l-6 6 6 6"/></svg>
+      </button>
+      <div class="search-wrap">
+        <input id="search" type="search" placeholder="메모 검색" autocomplete="off">
+      </div>
+      <button id="btn-clear" class="icon-btn" title="지우기" aria-label="검색어 지우기" hidden>
+        <svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg>
+      </button>
+      <button id="btn-settings" class="icon-btn gear" title="설정" aria-label="설정">
+        <svg viewBox="0 0 20 20">
+          <g class="teeth"><path d="M10 2.2v2.3M10 15.5v2.3M2.2 10h2.3M15.5 10h2.3M4.5 4.5l1.6 1.6M13.9 13.9l1.6 1.6M4.5 15.5l1.6-1.6M13.9 6.1l1.6-1.6"/></g>
+          <circle cx="10" cy="10" r="5"/>
+          <circle class="core" cx="10" cy="10" r="1.7"/>
+        </svg>
+      </button>
+    </header>
+
+    <div id="list" class="list"></div>
+
+    <footer class="bar foot">
+      <span></span>
+      <button id="btn-new-today" class="icon-btn sprout" title="오늘 메모 쓰기" aria-label="오늘 메모 쓰기">
+        <svg viewBox="0 0 20 20">
+          <path class="stem" d="M10 17.5v-6"/>
+          <path class="leaf" d="M10 11.5C6.8 11.5 4.6 9.3 4.3 6c3.3 0 5.7 2.2 5.7 5.5z"/>
+          <path class="leaf" d="M10 10.5c0-3.6 2.6-6.2 6-6.5-.1 3.6-2.6 6.3-6 6.5z"/>
+        </svg>
+      </button>
+    </footer>
+  </section>
+
+  <!-- 설정 화면 -->
+  <section id="view-settings" class="view" hidden>
+    <header class="bar">
+      <button id="btn-settings-back" class="icon-btn" title="돌아가기 (Esc)" aria-label="돌아가기">
+        <svg viewBox="0 0 20 20"><path d="M12 4l-6 6 6 6"/></svg>
+      </button>
+      <div class="title">설정</div>
+      <span class="icon-btn" aria-hidden="true"></span>
+    </header>
+
+    <div class="settings">
+      <div class="row">
+        <div class="row-text">
+          <div class="row-title">글자 크기</div>
+        </div>
+        <div class="seg" id="seg-font">
+          <button data-value="normal">기본</button>
+          <button data-value="large">크게</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-text">
+          <div class="row-title">크롬 계정으로 동기화</div>
+          <div class="row-desc">같은 계정으로 로그인한 크롬끼리 메모를 공유합니다. 메모 1개당 8KB, 전체 100KB까지만 동기화됩니다.</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="opt-sync">
+          <span></span>
+        </label>
+      </div>
+
+      <div class="row">
+        <div class="row-text">
+          <div class="row-title">백업</div>
+          <div class="row-desc">기간을 골라 파일로 저장하거나, 저장한 파일을 다시 불러옵니다. 불러올 때는 날짜가 같으면 더 최근 것을 남깁니다.</div>
+        </div>
+        <div class="btn-group">
+          <button id="btn-export" class="chip">내보내기</button>
+          <button id="btn-import" class="chip">가져오기</button>
+          <input type="file" id="file-import" accept="application/json,.json" hidden>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-text">
+          <div class="row-title">단축키</div>
+          <div class="row-desc">메모장 열기: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> · 변경은 <span class="link" id="link-shortcuts">chrome://extensions/shortcuts</span></div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-text">
+          <div class="row-title">선택 텍스트 담기</div>
+          <div class="row-desc">웹페이지에서 글을 드래그한 뒤 우클릭 → <b>오늘 메모에 추가</b></div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="bar foot">
+      <span id="settings-info"></span>
+      <span>Daily Memo 1.3</span>
+    </footer>
+  </section>
+
+  <!-- 내보내기 화면 -->
+  <section id="view-export" class="view" hidden>
+    <header class="bar">
+      <button id="btn-export-back" class="icon-btn" title="돌아가기 (Esc)" aria-label="돌아가기">
+        <svg viewBox="0 0 20 20"><path d="M12 4l-6 6 6 6"/></svg>
+      </button>
+      <div class="title">내보내기</div>
+      <span class="icon-btn" aria-hidden="true"></span>
+    </header>
+
+    <div class="export">
+      <div class="ex-label">범위</div>
+      <div class="ex-chips" id="ex-range">
+        <button data-range="all" class="on">전체</button>
+        <button data-range="year">올해</button>
+        <button data-range="month">이번 달</button>
+        <button data-range="30d">최근 30일</button>
+        <button data-range="custom">직접 선택</button>
+      </div>
+      <div class="ex-dates" id="ex-dates" hidden>
+        <input type="date" id="ex-from" aria-label="시작일">
+        <span class="ex-tilde">~</span>
+        <input type="date" id="ex-to" aria-label="종료일">
+      </div>
+
+      <div class="ex-label">형식</div>
+      <div class="ex-chips" id="ex-format">
+        <button data-format="json" class="on">JSON <small>복원용</small></button>
+        <button data-format="md">텍스트 <small>읽기용</small></button>
+      </div>
+
+      <div class="ex-summary" id="ex-summary"></div>
+
+      <label class="ex-check">
+        <input type="checkbox" id="ex-delete">
+        <span>저장한 뒤 이 메모들을 지우기</span>
+      </label>
+    </div>
+
+    <footer class="bar foot ex-foot">
+      <span id="ex-info"></span>
+      <span class="ex-actions">
+        <button id="ex-cancel-del" class="chip" hidden>취소</button>
+        <button id="ex-go" class="chip primary">파일로 저장</button>
+      </span>
+    </footer>
+  </section>
+
+  <!-- 크기 조절 핸들 (오른쪽 아래, 왼쪽 아래) -->
+  <div id="resizer" class="resizer" data-dir="1" title="드래그해서 크기 조절"></div>
+  <div id="resizer-left" class="resizer" data-dir="-1" title="드래그해서 크기 조절"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
