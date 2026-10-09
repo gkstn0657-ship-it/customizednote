@@ -1,6 +1,9 @@
 # 변경 이력
 
-## v2 (1.4.0) — 구글 드라이브 동기화
+## v1.4.1 (2026-10-09)
+- 버그 수정: 글자를 전부 지워 비운 메모에 삭제 기록이 안 남아 동기화 때 되살아나던 문제 (`applyEditorToMemos`)
+
+## v1.4.0 (2026-10-07) — 구글 드라이브 동기화
 
 ### 문제
 - v1 동기화는 `chrome.storage.sync`를 사용. 구글이 정한 한도가 전체 100KB, 하루 메모당 8KB.
@@ -34,7 +37,7 @@
 3. OAuth 클라이언트 ID: Chrome 확장 프로그램, 항목 ID `kedcopdniobclbhkilmfocdapigdappd`
 4. 스토어 심사 재제출 (권한 추가라 며칠 소요). `store/privacy.html`, `store/listing.md` 드라이브 내용 반영
 
-## v1 (1.3.0) — 첫 배포
+## v1.3.0 (2026-10-07) — 첫 배포
 - 날짜별 메모, 자동 저장, 검색, 서식, 이모지, 달력, 우클릭 담기, 백업, 크기 조절
 - 동기화: `chrome.storage.sync` (100KB 한도)
 - 상세 작업 기록은 `WORKLOG.md`
