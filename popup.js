@@ -257,7 +257,11 @@ function syncNote() {
 /* ---------- 메모 저장 ---------- */
 function applyEditorToMemos() {
   const text = getText();
-  if (text.trim() === '') { delete memos[currentDate]; return; } // 빈 메모는 보관하지 않음
+  if (text.trim() === '') {
+    // 빈 메모는 보관하지 않음. 있던 메모를 비운 거면 삭제 기록을 남겨 동기화 때 되살아나지 않게 함
+    if (memos[currentDate]) { delete memos[currentDate]; deleted[currentDate] = Date.now(); }
+    return;
+  }
   delete deleted[currentDate];
   const item = { text, updatedAt: Date.now() };
   const html = normalizeHtml(memoEl);
