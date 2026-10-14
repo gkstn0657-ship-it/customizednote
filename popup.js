@@ -72,6 +72,12 @@ function normalizeHtml(root) {
       if (n.nodeType !== 1) continue;
       const tag = n.tagName;
       if (tag === 'BR') { out += '<br>'; continue; }
+      if (n.classList && n.classList.contains('cb')) {
+        const on = n.dataset.checked === '1' || /[☑✅]/.test(n.textContent);
+        out += cbHtml(on);
+        hasFormat = true;
+        continue;
+      }
       const cs = n.style;
       let mark = st.mark;
       if (tag === 'MARK') mark = ['y', 'r', 'g'].find((c) => n.classList.contains(c)) || 'y';
@@ -251,7 +257,12 @@ function syncNote() {
   if (!settings.sync || !syncState || syncState.ok) return '';
   if (syncState.error === 'auth') return ' · 동기화: 구글 로그인 필요';
   if (syncState.error === 'quota') return ' · 드라이브 용량 부족';
+  if (syncState.error === 'limit') return ' · 연동 용량 초과 · 내보내기로 정리하세요';
   return ' · 동기화 실패, 다시 시도합니다';
+}
+// 연동 제한 상태면 상태줄을 눈에 띄게
+function syncWarn() {
+  return !!(settings.sync && syncState && !syncState.ok && (syncState.error === 'limit' || syncState.error === 'quota'));
 }
 
 /* ---------- 메모 저장 ---------- */
@@ -289,6 +300,10 @@ function scheduleSave() {
 function updateStatus() {
   const m = memos[currentDate];
   statusEl.textContent = (m ? `저장됨 ${formatTime(m.updatedAt)}` : '저장됨') + syncNote();
+  statusEl.classList.toggle('warn', syncWarn());
+  const limit = syncWarn() && syncState.error === 'limit';
+  statusEl.classList.toggle('link', limit);
+  statusEl.title = limit ? '메모 전체가 연동 상한(5MB)을 넘었습니다. 지난 메모를 파일로 저장하고 지우면 연동이 다시 됩니다. 누르면 내보내기로 이동' : '';
   btnDelete.hidden = !m;
   resetDeleteButton();
 }
@@ -643,8 +658,62 @@ memoEl.addEventListener('input', (e) => {
   if (memoEl.innerText.trim() === '' && memoEl.querySelector('span, b, mark, strong, font')) memoEl.innerHTML = ''; // 서식 찌꺼기 제거
   if (memoEl.innerHTML === '<br>' || memoEl.innerHTML === '<div><br></div>') memoEl.innerHTML = ''; // placeholder 복원
   if (e.inputType === 'insertText' && e.data) dropInheritedStyle(e.data);
+  if (e.inputType === 'insertText' && e.data === ' ') convertBracketCheckbox();
   scheduleSave();
 });
+/* ---------- 체크박스 ---------- */
+// 글자 ☐/☑ 를 안에 품어서 text(검색·내보내기·미리보기)에도 그대로 남게 함
+function cbHtml(on) {
+  // 체크되면 ✅ 이모지 자체를 보여 줌 (text/검색/내보내기에도 ✅ 로 남음)
+  return `<span class="cb" contenteditable="false" data-checked="${on ? 1 : 0}">${on ? '✅' : '☐'}</span>`;
+}
+// range 자리에 체크박스 + 공백을 넣고 커서를 그 뒤에 둠 (execCommand 는 빈 메모에서 커서를 앞에 남김)
+function insertCbAtRange(range) {
+  range.deleteContents();
+  const tpl = document.createElement('template');
+  tpl.innerHTML = cbHtml(false);
+  const span = tpl.content.firstChild;
+  const space = document.createTextNode(' ');
+  range.insertNode(space);
+  range.insertNode(span);
+  const r = document.createRange();
+  r.setStart(space, 1);
+  r.collapse(true);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+function insertCheckbox() {
+  if (document.activeElement !== memoEl || !selectionInEditor()) focusEnd();
+  insertCbAtRange(window.getSelection().getRangeAt(0));
+  memoEl.dispatchEvent(new Event('input'));
+}
+function toggleCheckbox(el) {
+  const on = el.dataset.checked !== '1';
+  el.dataset.checked = on ? '1' : '0';
+  el.textContent = on ? '✅' : '☐';
+  memoEl.dispatchEvent(new Event('input'));
+}
+// 줄 앞에 "[]" 치고 띄어쓰기하면 체크박스로 바꿔 줌
+function convertBracketCheckbox() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
+  const n = sel.anchorNode;
+  if (!n || n.nodeType !== 3) return;
+  const before = n.nodeValue.slice(0, sel.anchorOffset);
+  if (!/(^|\n)\[\] $/.test(before)) return;
+  const r = document.createRange();
+  r.setStart(n, sel.anchorOffset - 3);
+  r.setEnd(n, sel.anchorOffset);
+  insertCbAtRange(r);
+}
+memoEl.addEventListener('mousedown', (e) => {
+  const cb = e.target.closest('.cb');
+  if (!cb) return;
+  e.preventDefault(); // 커서 이동 없이 토글만
+  toggleCheckbox(cb);
+});
+
 // 서식 있는 글자를 지운 직후 타이핑하면 크롬이 지워진 서식을 그대로 이어붙임.
 // 방금 입력한 글자만 들어 있는 새 서식 조각이면 풀어서 일반 글자로 만든다.
 function dropInheritedStyle(data) {
@@ -754,6 +823,7 @@ emojiRow.addEventListener('mousedown', (e) => e.preventDefault());
 emojiRow.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
+  if (b.dataset.cmd === 'checkbox') { insertCheckbox(); return; }
   if (document.activeElement !== memoEl || !selectionInEditor()) focusEnd();
   document.execCommand('insertText', false, b.dataset.emoji);
 });
@@ -805,6 +875,12 @@ $('seg-font').addEventListener('click', async (e) => {
   await persistSettings();
 });
 $('btn-export').addEventListener('click', goExport);
+statusEl.addEventListener('click', async () => {
+  if (!statusEl.classList.contains('link')) return;
+  await saveNow();
+  goExport();
+  exInfo.textContent = '지난 메모를 저장하고 지우면 연동이 다시 됩니다';
+});
 $('btn-export-back').addEventListener('click', () => { renderSettings(); showView('settings'); });
 $('ex-range').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { ex.range = b.dataset.range; renderExport(); } });
 $('ex-format').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { ex.format = b.dataset.format; renderExport(); } });

@@ -113,6 +113,9 @@ async function runSync() {
       await setState({ ok: false, error: 'auth' });
     } else if (e.status === 403 && /quota|storage/i.test(e.message)) {
       await setState({ ok: false, error: 'quota' });
+    } else if (e.status === 413) {
+      // 메모 전체 파일이 업로드 상한을 넘음: 로컬 저장은 계속되고 연동만 멈춤
+      await setState({ ok: false, error: 'limit' });
     } else {
       await setState({ ok: false, error: 'network' });
     }
@@ -149,8 +152,15 @@ async function pull(token) {
   return { fileId, data };
 }
 
+const MAX_UPLOAD = 5 * 1024 * 1024; // 단순 업로드 방식의 파일 크기 상한 (5MB)
+
 async function push(token, fileId, data) {
   const body = JSON.stringify(data);
+  if (new TextEncoder().encode(body).length > MAX_UPLOAD) {
+    const err = new Error('memo file exceeds upload limit');
+    err.status = 413;
+    throw err;
+  }
   if (fileId) {
     await api(token, `${UPLOAD}/files/${fileId}?uploadType=media`, {
       method: 'PATCH',

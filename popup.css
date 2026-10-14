@@ -79,6 +79,9 @@ html, body {
   justify-content: space-between;
 }
 .foot-right { display: inline-flex; align-items: center; gap: 14px; }
+#status.warn { color: var(--danger); }
+#status.link { cursor: pointer; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgba(180, 68, 60, .5); }
+#status.link:hover { text-decoration-color: var(--danger); }
 
 .title {
   flex: 1;
@@ -278,6 +281,53 @@ html, body {
 #memo mark.r { background: var(--hl-r); }
 #memo mark.g { background: var(--hl-g); }
 #memo .lg { font-size: 1.35em; }
+/* 체크박스: 안의 글자(☐/☑)는 검색·내보내기용이고 화면에는 네모만 보임 */
+#memo .cb {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  margin: 0 7px 0 1px;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+  border: 1.6px solid var(--muted);
+  border-radius: 4px;
+  background: transparent;
+  box-sizing: border-box;
+  cursor: pointer;
+  overflow: hidden;
+  text-indent: -200px;   /* 안의 ☐/☑ 글자는 밀어내서 안 보이게 */
+  color: transparent;
+  user-select: none;
+}
+#memo .cb:hover { border-color: #5d8a52; }
+/* 체크되면 네모 대신 ✅ 이모지 글자 그대로 표시 */
+#memo .cb[data-checked="1"] {
+  width: auto;
+  height: auto;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+  text-indent: 0;
+  color: inherit;
+  font-size: 0.95em;
+  line-height: 1;
+  top: 0;
+  margin: 0 5px 0 0;
+}
+@media (prefers-color-scheme: dark) {
+  #memo .cb:hover { border-color: #8fbf84; }
+}
+/* 이모지 줄의 체크박스 버튼 */
+.cb-glyph {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  border: 1.6px solid var(--fg);
+  border-radius: 4px;
+  box-sizing: border-box;
+  vertical-align: middle;
+}
 #memo .sm { font-size: 0.82em; }
 
 /* 이모지 트레이 */
