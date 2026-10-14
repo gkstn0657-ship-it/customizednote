@@ -283,9 +283,11 @@ html, body {
 #memo .lg { font-size: 1.35em; }
 /* 체크박스: 안의 글자(☐/☑)는 검색·내보내기용이고 화면에는 네모만 보임 */
 #memo .cb {
-  display: inline-block;
-  width: 15px;
-  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   margin: 0 7px 0 1px;
   vertical-align: middle;
   position: relative;
@@ -296,27 +298,43 @@ html, body {
   box-sizing: border-box;
   cursor: pointer;
   overflow: hidden;
-  text-indent: -200px;   /* 안의 ☐/☑ 글자는 밀어내서 안 보이게 */
-  color: transparent;
+  color: transparent;          /* 빈 상태에서는 안의 ☐ 글자를 숨김 */
+  font-size: 13px;
+  line-height: 1;
   user-select: none;
+  transition: transform .12s ease, border-color .12s ease;
 }
 #memo .cb:hover { border-color: #5d8a52; }
-/* 체크되면 네모 대신 ✅ 이모지 글자 그대로 표시 */
+#memo .cb:active { transform: scale(.82); }   /* 꾸욱 눌리는 느낌 */
+/* 체크되면 같은 크기 네모 안에 ✅ 이모지가 꼭 맞게 들어감 */
+/* 체크되면 테두리까지 초록으로 꽉 채우고 흰 체크를 그림 (안의 ✅ 글자는 숨김) */
 #memo .cb[data-checked="1"] {
-  width: auto;
-  height: auto;
-  border: 0;
-  background: transparent;
-  overflow: visible;
-  text-indent: 0;
-  color: inherit;
-  font-size: 0.95em;
-  line-height: 1;
-  top: 0;
-  margin: 0 5px 0 0;
+  border-color: #5bb463;
+  background: #6fd079;
+  color: transparent;
+  animation: cb-pop .22s ease-out;
+}
+#memo .cb[data-checked="1"]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;              /* 네모 정중앙에 두고 */
+  width: 4.5px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2.2px 2.2px 0;
+  border-radius: 1px;
+  transform: translate(-0.3px, -1.2px) rotate(45deg);  /* 회전한 체크의 시각 중심 보정 */
+}
+#memo .cb[data-checked="1"]:hover { border-color: #4fa857; background: #63c96e; }
+@keyframes cb-pop {
+  0%   { transform: scale(.7); }
+  60%  { transform: scale(1.12); }
+  100% { transform: scale(1); }
 }
 @media (prefers-color-scheme: dark) {
   #memo .cb:hover { border-color: #8fbf84; }
+  #memo .cb[data-checked="1"] { border-color: #6fc877; background: #4fb85b; }
 }
 /* 이모지 줄의 체크박스 버튼 */
 .cb-glyph {
