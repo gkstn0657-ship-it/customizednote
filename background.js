@@ -32,6 +32,7 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
 
   const esc = (t) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   const item = { text, updatedAt: Date.now() };
+  if (memos[key] && memos[key].title) item.title = memos[key].title; // 제목 유지
   if (memos[key] && memos[key].html) {
     // 서식이 있는 메모는 html 도 유지
     const addition = quote.split('\n').map((l) => `<div>${esc(l)}</div>`).join('') + (source ? `<div>${esc(source.trim())}</div>` : '');

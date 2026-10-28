@@ -31,6 +31,7 @@ MOCK = r"""
     window.chrome = window.chrome || {};
     chrome.storage = { local: makeArea('dm:'), sync: makeArea('dmsync:'), onChanged: { addListener() {} } };
     chrome.tabs = { create: (o) => window.open(o.url) };
+    chrome.runtime = { id: 'kedcopdniobclbhkilmfocdapigdappd', sendMessage: () => Promise.resolve() };
 
     // 샘플 데이터 (처음 한 번만): 30개, 스크롤·월 그룹 확인용
     if (!localStorage.getItem('dm:memos')) {
@@ -40,6 +41,13 @@ MOCK = r"""
       const offs = [1,2,3,5,6,8,9,12,14,15,18,20,22,25,27,30,33,35,38,41,45,48,52,55,60,66,72,80,90,100];
       const samples = {};
       offs.forEach((o, i) => { samples[key(o)] = { text: `${lines[i % lines.length]}\n${lines[(i*3) % lines.length]}`, updatedAt: Date.now() - o * 86400000 }; });
+      // 오늘: 서식 견본 (제목, 굵게/기울임/밑줄/취소선, 제목1~3, 목록, 체크, 코드, 링크, 정렬)
+      samples[key(0)] = {
+        title: '오늘 할 일',
+        text: ['오늘 할 일', '굵게 기울임 밑줄 취소선', '제목 2', '• 장보기', '• 운동', '1. 첫째', '2. 둘째', '☐ 보고서 ✅ 메일', 'code 와 링크', '가운데'].join(String.fromCharCode(10)),
+        updatedAt: Date.now(),
+        html: '<div><b>굵게</b> <i>기울임</i> <u>밑줄</u> <s>취소선</s></div><h2>제목 2</h2><ul><li>장보기</li><li>운동</li></ul><ol><li>첫째</li><li>둘째</li></ol><div><span class="cb" contenteditable="false" data-checked="0">☐</span> 보고서 <span class="cb" contenteditable="false" data-checked="1">✅</span> 메일</div><div><code>code</code> 와 <a href="https://example.com">링크</a></div><div style="text-align: center">가운데</div>',
+      };
       localStorage.setItem('dm:memos', JSON.stringify(samples));
     }
   </script>

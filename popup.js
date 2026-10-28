@@ -1,11 +1,13 @@
 'use strict';
 
 /* ---------- 상수 / 상태 ---------- */
-const MEMOS_KEY = 'memos';        // { "YYYY-MM-DD": { text, updatedAt } }
+const MEMOS_KEY = 'memos';        // { "YYYY-MM-DD": { text, title?, html?, updatedAt } }
 const SIZE_KEY = 'popupSize';     // { w, h }
 const SETTINGS_KEY = 'settings';  // { sync: bool, fontSize: 'normal'|'large' }
 const DELETED_KEY = 'deleted';    // { "YYYY-MM-DD": 삭제시각 } 동기화 때 다른 기기에서 되살아나지 않게 함
 const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
+const EXT_ID = (chrome.runtime && chrome.runtime.id) || 'kedcopdniobclbhkilmfocdapigdappd';
+const REVIEW_URL = `https://chromewebstore.google.com/detail/${EXT_ID}/reviews`;
 
 let memos = {};
 let deleted = {};
@@ -19,6 +21,9 @@ let selfWriting = false;          // 내가 쓴 storage 변경은 무시하기 �
 const $ = (id) => document.getElementById(id);
 const views = { editor: $('view-editor'), list: $('view-list'), settings: $('view-settings'), export: $('view-export') };
 const memoEl = $('memo');
+const titleEl = $('title');
+const pageEl = $('page');
+const toolsEl = $('tools');
 const dateLabel = $('date-label');
 const statusEl = $('status');
 const btnToday = $('btn-today');
@@ -32,14 +37,55 @@ const settingsInfo = $('settings-info');
 const fmtBar = $('fmt');
 
 /* ---------- 편집기 유틸 (contenteditable) ---------- */
+const BLOCK_TAGS = new Set(['DIV', 'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'PRE', 'UL', 'OL', 'BLOCKQUOTE']);
+const LINE_TAGS = 'div,p,h1,h2,h3,li,pre';
+const LINE_SET = new Set(['DIV', 'P', 'H1', 'H2', 'H3', 'LI', 'PRE']);
+const esc = (t) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const escAttr = (t) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// 화면 내용을 글자로. 목록은 "• " / "1. ", 체크박스는 ☐/✅, 이미지는 [이미지]
+function plainText(root) {
+  let out = '';
+  const nl = () => { if (out && !out.endsWith('\n')) out += '\n'; };
+  (function walk(node) {
+    for (const n of node.childNodes) {
+      if (n.nodeType === 3) { out += n.nodeValue; continue; }
+      if (n.nodeType !== 1) continue;
+      const tag = n.tagName;
+      if (tag === 'BR') { out += '\n'; continue; }
+      if (tag === 'IMG') { out += '[이미지]'; continue; }
+      if (n.classList.contains('cb')) { out += n.textContent; continue; }
+      if (BLOCK_TAGS.has(tag)) {
+        nl();
+        if (tag === 'LI') {
+          const parent = n.parentElement;
+          const idx = Array.prototype.indexOf.call(parent.children, n) + 1;
+          out += parent.tagName === 'OL' ? `${idx}. ` : '• ';
+        }
+        walk(n);
+        nl();
+        continue;
+      }
+      walk(n);
+    }
+  })(root);
+  return out.replace(/\n$/, '');
+}
 function getText() {
-  // innerText 는 div/br 을 줄바꿈으로 바꿔 줌
-  return memoEl.innerText.replace(/\n$/, '');
+  return plainText(memoEl);
 }
 function setContent(memo) {
+  titleEl.value = memo && memo.title ? memo.title : '';
   if (!memo) { memoEl.innerHTML = ''; return; }
   if (memo.html) memoEl.innerHTML = sanitizeHtml(memo.html);
-  else memoEl.textContent = memo.text;
+  else memoEl.textContent = bodyOf(memo);
+  memoEl.querySelectorAll('a').forEach((a) => { a.title = 'Ctrl+클릭으로 열기'; });
+}
+// text 는 "제목\n본문" 꼴로 저장함 (검색·내보내기·동기화가 제목도 다루게). 본문만 꺼냄
+function bodyOf(memo) {
+  if (!memo) return '';
+  if (memo.title && memo.text.startsWith(memo.title)) return memo.text.slice(memo.title.length).replace(/^\n/, '');
+  return memo.text;
 }
 function focusEnd() {
   memoEl.focus();
@@ -50,28 +96,66 @@ function focusEnd() {
   sel.removeAllRanges();
   sel.addRange(r);
 }
-// 저장용 정규화: 어떤 마크업이 들어와도 b / mark / span.lg / span.sm / div / br 만 남김.
+function focusStart() {
+  memoEl.focus();
+  const r = document.createRange();
+  r.selectNodeContents(memoEl);
+  r.collapse(true);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+function setCaret(node, offset) {
+  const r = document.createRange();
+  r.setStart(node, offset);
+  r.collapse(true);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+// 저장용 정규화: 어떤 마크업이 들어와도 아래 태그만 남김.
+//   글자: b i u s code mark span.lg span.sm a[href]
+//   줄:   div(정렬) h1 h2 h3 ul ol li pre br img[src] span.cb
 // 서식이 하나도 없으면 null 을 돌려줘 text 만 저장하게 함.
 function normalizeHtml(root) {
   let hasFormat = false;
-  const esc = (t) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const alignAttr = (n) => {
+    const a = (n.style && n.style.textAlign) || n.getAttribute('align') || '';
+    if (a !== 'center' && a !== 'right') return '';
+    hasFormat = true;
+    return ` style="text-align: ${a}"`;
+  };
+  function wrapText(t, st) {
+    if (st.size === 'lg') t = `<span class="lg">${t}</span>`;
+    if (st.size === 'sm') t = `<span class="sm">${t}</span>`;
+    if (st.mark) t = `<mark class="${st.mark}">${t}</mark>`;
+    if (st.code) t = `<code>${t}</code>`;
+    if (st.strike) t = `<s>${t}</s>`;
+    if (st.underline) t = `<u>${t}</u>`;
+    if (st.italic) t = `<i>${t}</i>`;
+    if (st.bold) t = `<b>${t}</b>`;
+    if (st.href) t = `<a href="${escAttr(st.href)}">${t}</a>`;
+    if (st.bold || st.italic || st.underline || st.strike || st.code || st.mark || st.size || st.href) hasFormat = true;
+    return t;
+  }
   function walk(node, st) {
     let out = '';
     for (const n of node.childNodes) {
       if (n.nodeType === 3) {
         if (!n.nodeValue) continue;
-        let t = esc(n.nodeValue);
-        if (st.size === 'lg') t = `<span class="lg">${t}</span>`;
-        if (st.size === 'sm') t = `<span class="sm">${t}</span>`;
-        if (st.mark) t = `<mark class="${st.mark}">${t}</mark>`;
-        if (st.bold) t = `<b>${t}</b>`;
-        if (st.bold || st.mark || st.size) hasFormat = true;
-        out += t;
+        out += wrapText(esc(n.nodeValue), st);
         continue;
       }
       if (n.nodeType !== 1) continue;
       const tag = n.tagName;
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEMPLATE') continue;
       if (tag === 'BR') { out += '<br>'; continue; }
+      if (tag === 'IMG') {
+        const src = n.getAttribute('src') || '';
+        if (/^(data:image\/|https?:\/\/)/i.test(src)) { out += `<img src="${escAttr(src)}">`; hasFormat = true; }
+        continue;
+      }
       if (n.classList && n.classList.contains('cb')) {
         const on = n.dataset.checked === '1' || /[☑✅]/.test(n.textContent);
         out += cbHtml(on);
@@ -84,23 +168,49 @@ function normalizeHtml(root) {
       const byBg = colorKeyFromBg(cs.backgroundColor);
       if (byBg === 'none') mark = '';          // 투명 배경 = 형광펜 해제
       else if (byBg) mark = byBg;
+      const deco = `${cs.textDecorationLine || ''} ${cs.textDecoration || ''}`;
       const next = {
         bold: st.bold || tag === 'B' || tag === 'STRONG' || cs.fontWeight === 'bold' || Number(cs.fontWeight) >= 600,
+        italic: st.italic || tag === 'I' || tag === 'EM' || cs.fontStyle === 'italic',
+        underline: st.underline || tag === 'U' || deco.includes('underline'),
+        strike: st.strike || tag === 'S' || tag === 'STRIKE' || tag === 'DEL' || deco.includes('line-through'),
+        code: st.code || tag === 'CODE',
         mark,
         size: st.size,
+        href: st.href,
       };
+      if (cs.fontWeight === 'normal' || cs.fontWeight === '400') next.bold = false;
+      if (cs.fontStyle === 'normal') next.italic = false;
+      if (tag === 'A') {
+        const h = n.getAttribute('href') || '';
+        if (/^(https?:\/\/|mailto:)/i.test(h)) next.href = h;
+      }
       if (n.classList.contains('lg')) next.size = 'lg';
       else if (n.classList.contains('sm')) next.size = 'sm';
       else if (/x-large|xx-large|larger/.test(cs.fontSize)) next.size = 'lg';
       else if (/x-small|xx-small|^small$|smaller/.test(cs.fontSize)) next.size = 'sm';
       else if (cs.fontSize === 'medium') next.size = '';
       const inner = walk(n, next);
-      const block = tag === 'DIV' || tag === 'P' || tag === 'LI';
-      out += block ? `<div>${inner || '<br>'}</div>` : inner;
+      if (tag === 'H1' || tag === 'H2' || tag === 'H3') {
+        const t = tag.toLowerCase();
+        out += `<${t}${alignAttr(n)}>${inner || '<br>'}</${t}>`;
+        hasFormat = true;
+        continue;
+      }
+      if (tag === 'UL' || tag === 'OL') {
+        const t = tag.toLowerCase();
+        out += `<${t}>${inner}</${t}>`;
+        hasFormat = true;
+        continue;
+      }
+      if (tag === 'LI') { out += `<li${alignAttr(n)}>${inner || '<br>'}</li>`; hasFormat = true; continue; }
+      if (tag === 'PRE') { out += `<pre${alignAttr(n)}>${inner || '<br>'}</pre>`; hasFormat = true; continue; }
+      const block = BLOCK_TAGS.has(tag);
+      out += block ? `<div${alignAttr(n)}>${inner || '<br>'}</div>` : inner;
     }
     return out;
   }
-  const html = walk(root, { bold: false, mark: '', size: '' });
+  const html = walk(root, { bold: false, italic: false, underline: false, strike: false, code: false, mark: '', size: '', href: '' });
   return hasFormat ? html : null;
 }
 // 불러올 때: 저장된 html 을 다시 한 번 정규화해서 안전하게 주입
@@ -109,11 +219,10 @@ function sanitizeHtml(html) {
   tpl.innerHTML = html;
   const out = normalizeHtml(tpl.content);
   if (out !== null) return out;
-  const esc = (t) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   return esc(tpl.content.textContent);
 }
 
-/* ---------- 서식: 선택 시 나타나는 버튼 ---------- */
+/* ---------- 선택 영역 유틸 ---------- */
 function selectionInMemo() {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
@@ -121,7 +230,44 @@ function selectionInMemo() {
   if (!memoEl.contains(r.commonAncestorContainer)) return null;
   return r;
 }
-// 형광펜 색: CSS 변수 값을 rgb 문자열로 바꿔 두고, 배경색 → 색 키(y/r/g) 를 역으로 찾음
+function selectionInEditor() {
+  const sel = window.getSelection();
+  return sel && sel.rangeCount > 0 && memoEl.contains(sel.getRangeAt(0).commonAncestorContainer);
+}
+function ensureEditorFocus() {
+  if (document.activeElement !== memoEl || !selectionInEditor()) focusEnd();
+}
+function anchorElement() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return null;
+  let el = sel.getRangeAt(0).commonAncestorContainer;
+  if (el.nodeType === 3) el = el.parentElement;
+  return el && memoEl.contains(el) ? el : null;
+}
+function closestInMemo(selector) {
+  const el = anchorElement();
+  if (!el) return null;
+  const hit = el.closest(selector);
+  return hit && memoEl.contains(hit) && hit !== memoEl ? hit : null;
+}
+// 노드가 속한 "줄" 블록 (없으면 memoEl)
+function blockOf(node) {
+  let el = node.nodeType === 3 ? node.parentElement : node;
+  while (el && el !== memoEl && !LINE_SET.has(el.tagName)) el = el.parentElement;
+  return el || memoEl;
+}
+// 선택 영역에 걸친 줄 블록들 (자식 블록이 없는 것만). 루트 바로 아래 글자면 [memoEl]
+function selectedBlocks() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return [];
+  const r = sel.getRangeAt(0);
+  const start = blockOf(r.startContainer);
+  if (start === memoEl) return [memoEl];
+  const all = [...memoEl.querySelectorAll(LINE_TAGS)].filter((b) => r.intersectsNode(b) && !b.querySelector(LINE_TAGS));
+  return all.length ? all : [start];
+}
+
+/* ---------- 형광펜 / 크기 (선택 시 뜨는 작은 바) ---------- */
 const HL_KEYS = ['y', 'r', 'g'];
 let hlRgb = {};
 function hexToRgb(hex) {
@@ -140,7 +286,6 @@ function colorKeyFromBg(bg) {
   if (!bg) return null;
   if (bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)' || bg === 'initial' || bg === 'inherit' || bg === hlRgb.page) return 'none';
   for (const k of HL_KEYS) if (hlRgb[k] === bg) return k;
-  // 다크/라이트 전환 등으로 값이 다르면 가장 가까운 색으로
   const m = bg.match(/\d+/g);
   if (!m) return null;
   const [r, g, b] = m.map(Number);
@@ -150,14 +295,10 @@ function colorKeyFromBg(bg) {
     const d = (r - r2) ** 2 + (g - g2) ** 2 + (b - b2) ** 2;
     if (d < bestD) { bestD = d; best = k; }
   }
-  return bestD < 2500 ? best : 'none'; // 비슷한 색이 없으면 형광펜 아님
+  return bestD < 2500 ? best : 'none';
 }
 function currentMark() {
-  return colorKeyFromBg(document.queryCommandValue('backColor')); // 크롬은 hiliteColor 조회값이 비어 있음
-}
-function isMarked() {
-  const c = currentMark();
-  return !!c && c !== 'none';
+  return colorKeyFromBg(document.queryCommandValue('backColor'));
 }
 function currentSizeLevel() {
   const v = document.queryCommandValue('fontSize');
@@ -167,9 +308,9 @@ function currentSizeLevel() {
 }
 function updateFmtBar() {
   const r = selectionInMemo();
-  if (!r || views.editor.hidden || !calEl.hidden) { fmtBar.hidden = true; return; }
+  if (!r || views.editor.hidden || !calEl.hidden || !linkBox.hidden) { fmtBar.hidden = true; return; }
   const rect = r.getBoundingClientRect();
-  const wrap = memoEl.parentElement.getBoundingClientRect();
+  const wrap = memoEl.closest('.memo-wrap').getBoundingClientRect();
   fmtBar.hidden = false;
   const bw = fmtBar.offsetWidth, bh = fmtBar.offsetHeight;
   let left = rect.left - wrap.left + rect.width / 2 - bw / 2;
@@ -178,7 +319,6 @@ function updateFmtBar() {
   if (top < 4) top = rect.bottom - wrap.top + 8;
   fmtBar.style.left = `${left}px`;
   fmtBar.style.top = `${top}px`;
-  fmtBar.querySelector('[data-cmd=bold]').classList.toggle('on', document.queryCommandState('bold'));
   const cur = currentMark();
   fmtBar.querySelectorAll('[data-cmd=mark]').forEach((b) => b.classList.toggle('on', b.dataset.color === cur));
 }
@@ -186,11 +326,8 @@ function applyFormat(cmd, color) {
   if (!selectionInMemo()) return;
   if (!hlRgb.y) refreshHlColors();
   document.execCommand('styleWithCSS', false, true);
-  if (cmd === 'bold') {
-    document.execCommand('bold');
-  } else if (cmd === 'mark') {
+  if (cmd === 'mark') {
     const key = color || 'y';
-    // 같은 색을 다시 누르면 해제, 다른 색이면 바꿈
     document.execCommand('hiliteColor', false, currentMark() === key ? 'transparent' : hlRgb[key]);
   } else if (cmd === 'bigger' || cmd === 'smaller') {
     const lv = clamp(currentSizeLevel() + (cmd === 'bigger' ? 1 : -1), -1, 1);
@@ -199,6 +336,231 @@ function applyFormat(cmd, color) {
   memoEl.dispatchEvent(new Event('input'));
   updateFmtBar();
 }
+
+/* ---------- 서식 도구줄 ---------- */
+function toggleHeading(tag) {
+  const cur = (document.queryCommandValue('formatBlock') || '').toLowerCase();
+  document.execCommand('formatBlock', false, cur === tag ? 'div' : tag);
+}
+function firstContent(block) {
+  let n = block.firstChild;
+  while (n && n.nodeType === 3 && !n.nodeValue.trim()) n = n.nextSibling;
+  return n;
+}
+// 체크리스트: 선택한 줄들 맨 앞에 체크박스를 넣거나(이미 다 있으면) 뺌
+function toggleChecklist() {
+  const blocks = selectedBlocks();
+  if (!blocks.length || blocks[0] === memoEl) { insertCheckbox(); return; }
+  const hasCb = (b) => { const f = firstContent(b); return !!(f && f.nodeType === 1 && f.classList.contains('cb')); };
+  const allHave = blocks.every(hasCb);
+  const sel = window.getSelection();
+  const collapsed = sel.isCollapsed;
+  for (const b of blocks) {
+    if (allHave) {
+      const cb = firstContent(b);
+      const next = cb.nextSibling;
+      cb.remove();
+      if (next && next.nodeType === 3 && next.nodeValue.startsWith(' ')) {
+        next.nodeValue = next.nodeValue.slice(1);
+        if (!next.nodeValue) next.remove();
+      }
+      if (!b.firstChild) b.appendChild(document.createElement('br'));
+    } else if (!hasCb(b)) {
+      const tpl = document.createElement('template');
+      tpl.innerHTML = cbHtml(false);
+      const span = tpl.content.firstChild;
+      const space = document.createTextNode(' ');
+      const br = b.firstChild && b.firstChild.tagName === 'BR' && b.childNodes.length === 1 ? b.firstChild : null;
+      b.insertBefore(space, b.firstChild);
+      b.insertBefore(span, space);
+      if (br) br.remove();
+      if (collapsed && blocks.length === 1) setCaret(space, 1);
+    }
+  }
+  memoEl.dispatchEvent(new Event('input'));
+}
+// 코드: 글자를 골랐으면 인라인 <code>, 아니면 줄을 <pre> 로. 이미 코드면 해제
+function toggleCode() {
+  const sel = window.getSelection();
+  const codeEl = closestInMemo('code');
+  if (codeEl) {
+    codeEl.replaceWith(...codeEl.childNodes);
+    memoEl.normalize();
+    memoEl.dispatchEvent(new Event('input'));
+    return;
+  }
+  const preEl = closestInMemo('pre');
+  const r = sel.getRangeAt(0);
+  if (sel.isCollapsed || preEl || blockOf(r.startContainer) !== blockOf(r.endContainer)) {
+    document.execCommand('formatBlock', false, preEl ? 'div' : 'pre');
+    memoEl.dispatchEvent(new Event('input'));
+    return;
+  }
+  const frag = r.extractContents();
+  const code = document.createElement('code');
+  code.appendChild(frag);
+  r.insertNode(code);
+  const nr = document.createRange();
+  nr.selectNodeContents(code);
+  sel.removeAllRanges();
+  sel.addRange(nr);
+  memoEl.dispatchEvent(new Event('input'));
+}
+
+// 링크
+const linkBox = $('link-box');
+const linkUrl = $('link-url');
+let savedRange = null;
+function currentLink() {
+  return closestInMemo('a');
+}
+function openLinkBox() {
+  ensureEditorFocus();
+  savedRange = window.getSelection().getRangeAt(0).cloneRange();
+  const a = currentLink();
+  linkUrl.value = a ? a.getAttribute('href') || '' : '';
+  $('link-remove').hidden = !a;
+  linkBox.hidden = false;
+  toggleEmojiRow(false);
+  fmtBar.hidden = true;
+  linkUrl.focus();
+  linkUrl.select();
+}
+function closeLinkBox(restore) {
+  linkBox.hidden = true;
+  if (restore && savedRange) {
+    memoEl.focus();
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+  }
+  savedRange = null;
+}
+function applyLink() {
+  let url = linkUrl.value.trim();
+  if (!url) { closeLinkBox(true); return; }
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = 'https://' + url;
+  closeLinkBox(true);
+  const a = currentLink();
+  const sel = window.getSelection();
+  if (a) {
+    a.setAttribute('href', url);
+  } else if (sel.isCollapsed) {
+    const r = sel.getRangeAt(0);
+    const link = document.createElement('a');
+    link.href = url;
+    link.textContent = url;
+    const space = document.createTextNode(' ');
+    r.insertNode(space);
+    r.insertNode(link);
+    setCaret(space, 1);
+  } else {
+    document.execCommand('createLink', false, url);
+  }
+  memoEl.querySelectorAll('a').forEach((x) => { x.title = 'Ctrl+클릭으로 열기'; });
+  memoEl.dispatchEvent(new Event('input'));
+}
+function removeLink() {
+  closeLinkBox(true);
+  const a = currentLink();
+  if (a) { a.replaceWith(...a.childNodes); memoEl.normalize(); memoEl.dispatchEvent(new Event('input')); }
+}
+function openUrl(url) {
+  if (chrome.tabs && chrome.tabs.create) chrome.tabs.create({ url });
+  else window.open(url, '_blank');
+}
+$('link-ok').addEventListener('click', applyLink);
+$('link-remove').addEventListener('click', removeLink);
+linkUrl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); applyLink(); }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeLinkBox(true); }
+});
+linkBox.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
+
+// 이미지: 긴 변 1000px 이하로 줄여 메모 안에 넣음
+function insertImageFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    const MAX = 1000;
+    const scale = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    c.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    const keepAlpha = file.type === 'image/png' || file.type === 'image/gif' || file.type === 'image/webp';
+    const dataUrl = c.toDataURL(keepAlpha ? 'image/png' : 'image/jpeg', 0.85);
+    URL.revokeObjectURL(url);
+    ensureEditorFocus();
+    document.execCommand('insertImage', false, dataUrl);
+    memoEl.dispatchEvent(new Event('input'));
+  };
+  img.onerror = () => URL.revokeObjectURL(url);
+  img.src = url;
+}
+$('file-image').addEventListener('change', (e) => {
+  if (e.target.files[0]) insertImageFile(e.target.files[0]);
+  e.target.value = '';
+});
+
+function runTool(cmd) {
+  if (cmd === 'emoji') { toggleEmojiRow(); return; }
+  if (cmd === 'image') { $('file-image').click(); return; }
+  if (!calEl.hidden) return;
+  if (cmd === 'link') { openLinkBox(); return; }
+  ensureEditorFocus();
+  document.execCommand('styleWithCSS', false, true);
+  switch (cmd) {
+    case 'bold': document.execCommand('bold'); break;
+    case 'italic': document.execCommand('italic'); break;
+    case 'underline': document.execCommand('underline'); break;
+    case 'strike': document.execCommand('strikeThrough'); break;
+    case 'h1': case 'h2': case 'h3': toggleHeading(cmd); break;
+    case 'ul': document.execCommand('insertUnorderedList'); break;
+    case 'ol': document.execCommand('insertOrderedList'); break;
+    case 'checkbox': toggleChecklist(); updateTools(); return;
+    case 'code': toggleCode(); updateTools(); return;
+    case 'left': document.execCommand('justifyLeft'); break;
+    case 'center': document.execCommand('justifyCenter'); break;
+    case 'right': document.execCommand('justifyRight'); break;
+    default: return;
+  }
+  memoEl.dispatchEvent(new Event('input'));
+  updateTools();
+}
+const qcs = (c) => { try { return document.queryCommandState(c); } catch (e) { return false; } };
+function updateTools() {
+  if (views.editor.hidden) return;
+  const inEd = document.activeElement === memoEl && selectionInEditor();
+  const st = {};
+  if (inEd) {
+    st.bold = qcs('bold');
+    st.italic = qcs('italic');
+    st.underline = qcs('underline');
+    st.strike = qcs('strikeThrough');
+    const fb = (document.queryCommandValue('formatBlock') || '').toLowerCase();
+    st.h1 = fb === 'h1'; st.h2 = fb === 'h2'; st.h3 = fb === 'h3';
+    st.ul = qcs('insertUnorderedList');
+    st.ol = qcs('insertOrderedList');
+    st.code = !!closestInMemo('code, pre');
+    st.link = !!currentLink();
+    st.center = qcs('justifyCenter');
+    st.right = qcs('justifyRight');
+    const blocks = selectedBlocks();
+    st.checkbox = blocks.length > 0 && blocks[0] !== memoEl && blocks.every((b) => { const f = firstContent(b); return !!(f && f.nodeType === 1 && f.classList.contains('cb')); });
+  }
+  toolsEl.querySelectorAll('button[data-cmd]').forEach((b) => {
+    const c = b.dataset.cmd;
+    if (c === 'emoji' || c === 'image' || c === 'left') return;
+    b.classList.toggle('on', !!st[c]);
+  });
+}
+toolsEl.addEventListener('mousedown', (e) => { if (e.target.closest('button')) e.preventDefault(); }); // 선택/커서 유지
+toolsEl.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-cmd]');
+  if (b) runTool(b.dataset.cmd);
+});
 
 /* ---------- 날짜 유틸 ---------- */
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -252,7 +614,6 @@ function requestSync() {
   if (!settings.sync) return;
   chrome.runtime.sendMessage({ type: 'sync' }).catch(() => {});
 }
-// 상태줄 뒤에 붙일 동기화 문구. 정상이면 빈 문자열
 function syncNote() {
   if (!settings.sync || !syncState || syncState.ok) return '';
   if (syncState.error === 'auth') return ' · 동기화: 구글 로그인 필요';
@@ -260,14 +621,15 @@ function syncNote() {
   if (syncState.error === 'limit') return ' · 연동 용량 초과 · 내보내기로 정리하세요';
   return ' · 동기화 실패, 다시 시도합니다';
 }
-// 연동 제한 상태면 상태줄을 눈에 띄게
 function syncWarn() {
   return !!(settings.sync && syncState && !syncState.ok && (syncState.error === 'limit' || syncState.error === 'quota'));
 }
 
 /* ---------- 메모 저장 ---------- */
 function applyEditorToMemos() {
-  const text = getText();
+  const title = titleEl.value.trim();
+  const body = getText();
+  const text = [title, body].filter(Boolean).join('\n');
   if (text.trim() === '') {
     // 빈 메모는 보관하지 않음. 있던 메모를 비운 거면 삭제 기록을 남겨 동기화 때 되살아나지 않게 함
     if (memos[currentDate]) { delete memos[currentDate]; deleted[currentDate] = Date.now(); }
@@ -275,6 +637,7 @@ function applyEditorToMemos() {
   }
   delete deleted[currentDate];
   const item = { text, updatedAt: Date.now() };
+  if (title) item.title = title;
   const html = normalizeHtml(memoEl);
   if (html !== null) item.html = html; // 서식이 있을 때만 html 보관
   memos[currentDate] = item;
@@ -315,7 +678,9 @@ function openDate(key, focus = true) {
   dirty = false;
   updateStatus();
   showView('editor');
+  pageEl.scrollTop = 0;
   if (focus) focusEnd();
+  updateTools();
 }
 async function moveDay(delta) {
   await saveNow();
@@ -384,7 +749,6 @@ function renderList() {
     .filter((k) => !q || memos[k].text.toLowerCase().includes(ql))
     .sort((a, b) => (a < b ? 1 : -1));
 
-
   if (keys.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty';
@@ -404,6 +768,7 @@ function renderList() {
       frag.appendChild(h);
       lastMonth = month;
     }
+    const m = memos[key];
     const btn = document.createElement('button');
     btn.className = 'item';
     btn.dataset.key = key;
@@ -419,11 +784,20 @@ function renderList() {
       tag.textContent = '오늘';
       date.appendChild(tag);
     }
-    const preview = document.createElement('div');
-    preview.className = 'preview';
-    preview.innerHTML = highlight(snippet(memos[key].text, q), q);
-
-    btn.append(date, preview);
+    btn.appendChild(date);
+    if (m.title) {
+      const ttl = document.createElement('div');
+      ttl.className = 'ttl';
+      ttl.innerHTML = highlight(m.title, q);
+      btn.appendChild(ttl);
+    }
+    const body = bodyOf(m);
+    if (body.trim()) {
+      const preview = document.createElement('div');
+      preview.className = 'preview';
+      preview.innerHTML = highlight(snippet(body, q), q);
+      btn.appendChild(preview);
+    }
     frag.appendChild(btn);
   }
   listEl.replaceChildren(frag);
@@ -445,7 +819,6 @@ async function onToggleSync() {
   settings.sync = optSync.checked;
   await persistSettings();
   if (!settings.sync) { renderSettings(); return; }
-  // 구글 로그인 (허용 창은 사용자가 토글을 누른 직후에만 띄울 수 있음)
   settingsInfo.textContent = '구글 로그인 중…';
   try {
     await chrome.identity.getAuthToken({ interactive: true });
@@ -523,7 +896,8 @@ function buildExportFile(keys) {
   }
   const lines = [`# Daily Memo (${formatKey(keys[0])} ~ ${formatKey(keys[keys.length - 1])})`, ''];
   for (const k of [...keys].reverse()) {
-    lines.push(`## ${formatKey(k)}`, '', memos[k].text, '');
+    const m = memos[k];
+    lines.push(`## ${formatKey(k)}${m.title ? ` — ${m.title}` : ''}`, '', bodyOf(m), '');
   }
   return { name: `daily-memo-${stamp}.md`, type: 'text/markdown', body: lines.join('\n') };
 }
@@ -548,7 +922,6 @@ async function deleteMany(keys) {
 async function onExportGo() {
   const keys = exportKeys();
   if (!keys.length) return;
-  // 2단계: 삭제 확인 대기 중이면 실제 삭제
   if (ex.pendingDelete) {
     const del = ex.pendingDelete;
     ex.pendingDelete = null;
@@ -559,7 +932,6 @@ async function onExportGo() {
   }
   downloadFile(buildExportFile(keys));
   if (!exDel.checked) { exInfo.textContent = `${keys.length}개 저장했습니다`; return; }
-  // 저장 후 삭제: 한 번 더 확인
   ex.pendingDelete = keys;
   exInfo.textContent = `저장했습니다. ${keys.length}개를 지울까요?`;
   exGo.textContent = `${keys.length}개 지우기`;
@@ -575,6 +947,7 @@ async function importJson(file) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(k) || !v || typeof v.text !== 'string') continue;
       const item = { text: v.text, updatedAt: Number(v.updatedAt) || Date.now() };
       if (typeof v.html === 'string' && v.html) item.html = v.html; // 서식 보존 (불러올 때 다시 정규화됨)
+      if (typeof v.title === 'string' && v.title) item.title = v.title;
       if (!memos[k]) { memos[k] = item; added++; }
       else if (item.updatedAt > memos[k].updatedAt) { memos[k] = item; updated++; }
       else continue;
@@ -590,31 +963,29 @@ async function importJson(file) {
 }
 
 /* ---------- 화면 전환 ---------- */
-let prevView = 'editor';
 let navSeq = 0; // 저장을 기다리는 동안 다른 화면으로 넘어갔는지 확인용
 function showView(name) {
   navSeq++;
   for (const [k, el] of Object.entries(views)) el.hidden = k !== name;
-  if (name !== 'editor') { toggleEmojiRow(false); toggleCalendar(false); }
+  if (name !== 'editor') { toggleEmojiRow(false); toggleCalendar(false); closeLinkBox(false); }
 }
 async function goList() {
   const seq = navSeq;
   await saveNow();
-  if (seq !== navSeq) return; // 그 사이 다른 화면이 열렸으면 덮어쓰지 않음
+  if (seq !== navSeq) return;
   renderList();
   showView('list');
   searchEl.focus();
   searchEl.select();
 }
 function goSettings() {
-  prevView = 'list';
   renderSettings();
   showView('settings');
 }
 
 /* ---------- 창 크기 조절 ---------- */
 const MIN_W = 320, MIN_H = 300, MAX_W = 800, MAX_H = 600;
-const DEF_W = 320, DEF_H = 300; // 처음 실행 시 크기 = 최소 크기 (popup.css 의 --w/--h 와 같게)
+const DEF_W = 340, DEF_H = 420; // 처음 실행 시 크기 (popup.css 의 --w/--h 와 같게)
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 let curW = DEF_W, curH = DEF_H;
 function applySize(w, h) {
@@ -655,19 +1026,22 @@ document.querySelectorAll('.resizer').forEach(initResizer);
 
 /* ---------- 이벤트 ---------- */
 memoEl.addEventListener('input', (e) => {
-  if (memoEl.innerText.trim() === '' && memoEl.querySelector('span, b, mark, strong, font')) memoEl.innerHTML = ''; // 서식 찌꺼기 제거
+  // 글자를 다 지웠는데 서식 조각만 남으면 비움 (이미지·체크박스가 있으면 그대로)
+  if (memoEl.innerText.trim() === '' && !memoEl.querySelector('img, .cb') && memoEl.querySelector('span, b, mark, strong, font, i, u, s, strike, code, a')) memoEl.innerHTML = '';
   if (memoEl.innerHTML === '<br>' || memoEl.innerHTML === '<div><br></div>') memoEl.innerHTML = ''; // placeholder 복원
   if (e.inputType === 'insertText' && e.data) dropInheritedStyle(e.data);
   if (e.inputType === 'insertText' && e.data === ' ') convertBracketCheckbox();
   scheduleSave();
 });
+titleEl.addEventListener('input', scheduleSave);
+titleEl.addEventListener('blur', saveNow);
+titleEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || (e.key === 'ArrowDown' && !e.shiftKey)) { e.preventDefault(); focusStart(); }
+});
 /* ---------- 체크박스 ---------- */
-// 글자 ☐/☑ 를 안에 품어서 text(검색·내보내기·미리보기)에도 그대로 남게 함
 function cbHtml(on) {
-  // 체크되면 ✅ 이모지 자체를 보여 줌 (text/검색/내보내기에도 ✅ 로 남음)
   return `<span class="cb" contenteditable="false" data-checked="${on ? 1 : 0}">${on ? '✅' : '☐'}</span>`;
 }
-// range 자리에 체크박스 + 공백을 넣고 커서를 그 뒤에 둠 (execCommand 는 빈 메모에서 커서를 앞에 남김)
 function insertCbAtRange(range) {
   range.deleteContents();
   const tpl = document.createElement('template');
@@ -676,15 +1050,10 @@ function insertCbAtRange(range) {
   const space = document.createTextNode(' ');
   range.insertNode(space);
   range.insertNode(span);
-  const r = document.createRange();
-  r.setStart(space, 1);
-  r.collapse(true);
-  const sel = window.getSelection();
-  sel.removeAllRanges();
-  sel.addRange(r);
+  setCaret(space, 1);
 }
 function insertCheckbox() {
-  if (document.activeElement !== memoEl || !selectionInEditor()) focusEnd();
+  ensureEditorFocus();
   insertCbAtRange(window.getSelection().getRangeAt(0));
   memoEl.dispatchEvent(new Event('input'));
 }
@@ -709,9 +1078,13 @@ function convertBracketCheckbox() {
 }
 memoEl.addEventListener('mousedown', (e) => {
   const cb = e.target.closest('.cb');
-  if (!cb) return;
-  e.preventDefault(); // 커서 이동 없이 토글만
-  toggleCheckbox(cb);
+  if (cb) { e.preventDefault(); toggleCheckbox(cb); return; }
+  const a = e.target.closest('a');
+  if (a && (e.ctrlKey || e.metaKey)) { e.preventDefault(); openUrl(a.href); }
+});
+memoEl.addEventListener('click', (e) => {
+  const a = e.target.closest('a');
+  if (a && (e.ctrlKey || e.metaKey)) e.preventDefault();
 });
 
 // 서식 있는 글자를 지운 직후 타이핑하면 크롬이 지워진 서식을 그대로 이어붙임.
@@ -722,30 +1095,44 @@ function dropInheritedStyle(data) {
   let el = sel.anchorNode;
   if (el.nodeType === 3) el = el.parentElement;
   if (!el || el === memoEl || !memoEl.contains(el)) return;
-  const styled = ['SPAN', 'B', 'STRONG', 'MARK', 'FONT'].includes(el.tagName);
+  const styled = ['SPAN', 'B', 'STRONG', 'MARK', 'FONT', 'I', 'EM', 'U', 'S', 'STRIKE', 'CODE'].includes(el.tagName);
   if (!styled || el.textContent !== data) return;
   const text = document.createTextNode(data);
   el.replaceWith(text);
-  const r = document.createRange();
-  r.setStart(text, text.length);
-  r.collapse(true);
-  sel.removeAllRanges();
-  sel.addRange(r);
+  setCaret(text, text.length);
 }
 memoEl.addEventListener('blur', saveNow);
 memoEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+  if (e.key === 'Tab' && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
-    document.execCommand('insertText', false, '\t');
+    if (closestInMemo('li')) document.execCommand(e.shiftKey ? 'outdent' : 'indent');
+    else if (!e.shiftKey) document.execCommand('insertText', false, '\t');
+    return;
+  }
+  // 빈 본문 맨 앞에서 Backspace → 제목으로
+  if (e.key === 'Backspace' && memoEl.textContent === '' && !memoEl.querySelector('img, .cb')) {
+    e.preventDefault();
+    titleEl.focus();
+    titleEl.setSelectionRange(titleEl.value.length, titleEl.value.length);
   }
 });
-// 붙여넣기는 항상 일반 텍스트로
+// 붙여넣기: 이미지는 그림으로, 나머지는 일반 텍스트로
 memoEl.addEventListener('paste', (e) => {
+  const cd = e.clipboardData || window.clipboardData;
+  const img = cd.files && [...cd.files].find((f) => f.type.startsWith('image/'));
   e.preventDefault();
-  const text = (e.clipboardData || window.clipboardData).getData('text/plain');
-  document.execCommand('insertText', false, text);
+  if (img) { insertImageFile(img); return; }
+  document.execCommand('insertText', false, cd.getData('text/plain'));
 });
-document.addEventListener('selectionchange', updateFmtBar);
+memoEl.addEventListener('drop', (e) => {
+  const f = e.dataTransfer && e.dataTransfer.files && [...e.dataTransfer.files].find((x) => x.type.startsWith('image/'));
+  if (!f) return;
+  e.preventDefault();
+  insertImageFile(f);
+});
+document.addEventListener('selectionchange', () => { updateFmtBar(); updateTools(); });
+memoEl.addEventListener('focus', updateTools);
+memoEl.addEventListener('blur', updateTools);
 
 // 달력
 const calEl = $('cal');
@@ -756,7 +1143,7 @@ let calYear = 0, calMonth = 0; // 보고 있는 달 (month: 1~12)
 function renderCalendar() {
   calTitle.textContent = `${calYear}년 ${calMonth}월`;
   const first = new Date(calYear, calMonth - 1, 1);
-  const start = new Date(calYear, calMonth - 1, 1 - first.getDay()); // 그 주 일요일부터
+  const start = new Date(calYear, calMonth - 1, 1 - first.getDay());
   const today = todayKey();
   const frag = document.createDocumentFragment();
   for (let i = 0; i < 42; i++) {
@@ -790,6 +1177,7 @@ function toggleCalendar(show) {
     calYear = y; calMonth = m;
     renderCalendar();
     toggleEmojiRow(false);
+    closeLinkBox(false);
   }
   calEl.hidden = !on;
   dateLabel.classList.toggle('on', on);
@@ -817,21 +1205,14 @@ function toggleEmojiRow(show) {
   document.body.classList.toggle('emoji-open', on);
   if (on && document.activeElement !== memoEl) focusEnd();
 }
-btnEmoji.addEventListener('mousedown', (e) => e.preventDefault()); // 커서 위치 유지
-btnEmoji.addEventListener('click', () => toggleEmojiRow());
 emojiRow.addEventListener('mousedown', (e) => e.preventDefault());
 emojiRow.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  if (b.dataset.cmd === 'checkbox') { insertCheckbox(); return; }
-  if (document.activeElement !== memoEl || !selectionInEditor()) focusEnd();
+  ensureEditorFocus();
   document.execCommand('insertText', false, b.dataset.emoji);
 });
-function selectionInEditor() {
-  const sel = window.getSelection();
-  return sel && sel.rangeCount > 0 && memoEl.contains(sel.getRangeAt(0).commonAncestorContainer);
-}
-memoEl.addEventListener('scroll', updateFmtBar);
+pageEl.addEventListener('scroll', updateFmtBar);
 fmtBar.addEventListener('mousedown', (e) => e.preventDefault()); // 선택 유지
 fmtBar.addEventListener('click', (e) => {
   const b = e.target.closest('button');
@@ -839,8 +1220,11 @@ fmtBar.addEventListener('click', (e) => {
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', refreshHlColors);
 
+// 리뷰: 별을 누르면 웹스토어 리뷰 화면으로
+$('btn-review').addEventListener('click', () => openUrl(REVIEW_URL));
+$('stars').addEventListener('click', (e) => { if (e.target.closest('button')) openUrl(REVIEW_URL); });
+
 $('btn-list').addEventListener('click', goList);
-$('btn-search').addEventListener('click', goList);
 $('btn-back').addEventListener('click', () => openDate(currentDate));
 $('btn-prev').addEventListener('click', () => moveDay(-1));
 $('btn-next').addEventListener('click', () => moveDay(1));
@@ -894,15 +1278,15 @@ $('file-import').addEventListener('change', (e) => {
   if (e.target.files[0]) importJson(e.target.files[0]);
   e.target.value = '';
 });
-$('link-shortcuts').addEventListener('click', () => {
-  if (chrome.tabs && chrome.tabs.create) chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
-});
+$('link-shortcuts').addEventListener('click', () => openUrl('chrome://extensions/shortcuts'));
 
 document.addEventListener('keydown', (e) => {
   const inEditor = !views.editor.hidden;
   const inSettings = !views.settings.hidden;
+  const mod = e.ctrlKey || e.metaKey;
   if (e.key === 'Escape') {
     e.preventDefault();
+    if (inEditor && !linkBox.hidden) { closeLinkBox(true); return; }
     if (inEditor && !calEl.hidden) { toggleCalendar(false); return; }
     if (inEditor && !emojiRow.hidden) { toggleEmojiRow(false); return; }
     if (!views.export.hidden) { renderSettings(); showView('settings'); return; }
@@ -916,20 +1300,33 @@ document.addEventListener('keydown', (e) => {
     moveDay(e.key === 'ArrowLeft' ? -1 : 1);
     return;
   }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && inEditor) {
+  if (mod && !e.shiftKey && e.key.toLowerCase() === 'f' && inEditor) {
     e.preventDefault();
     goList();
     return;
   }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+  if (mod && !e.shiftKey && e.key.toLowerCase() === 's') {
     e.preventDefault();
     saveNow();
     return;
   }
-  if (inEditor && (e.ctrlKey || e.metaKey) && !e.altKey) {
-    const map = { b: 'bold', h: 'mark', '[': 'smaller', ']': 'bigger' };
-    const cmd = map[e.key.toLowerCase()];
-    if (cmd) { e.preventDefault(); applyFormat(cmd); }
+  if (inEditor && mod && !e.altKey && (document.activeElement === memoEl || document.activeElement === titleEl)) {
+    const k = e.key.toLowerCase();
+    let cmd = null;
+    if (e.shiftKey) {
+      if (k === 's') cmd = 'strike';
+      else if (k === 'c') cmd = 'checkbox';
+      else if (e.code === 'Digit7') cmd = 'ol';
+      else if (e.code === 'Digit8') cmd = 'ul';
+    } else {
+      cmd = { b: 'bold', i: 'italic', u: 'underline', e: 'code', k: 'link', 1: 'h1', 2: 'h2', 3: 'h3' }[k] || null;
+      if (k === 'h' || k === '[' || k === ']') {
+        e.preventDefault();
+        applyFormat({ h: 'mark', '[': 'smaller', ']': 'bigger' }[k]);
+        return;
+      }
+    }
+    if (cmd) { e.preventDefault(); runTool(cmd); }
   }
 });
 
@@ -965,6 +1362,5 @@ window.addEventListener('pagehide', () => {
   refreshHlColors();
   await load();
   openDate(todayKey());
-  // 동기화 켜져 있으면 background 가 받아오고, 바뀐 메모는 storage.onChanged 로 화면에 반영됨
   requestSync();
 })();
